@@ -108,17 +108,28 @@ async def search_papers(data: PromptRequest):
         encoded_query = urllib.parse.quote_plus(smart_query)
         search_url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num=10"
         
-        # Headers to mimic a real browser
+        # Headers to mimic a real browser with more recent user agent
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
         }
 
-        # Make request with timeout
-        response = requests.get(search_url, headers=headers, timeout=10)
+        # Make request with timeout and session for better reliability
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        # Add a small delay to avoid being flagged as bot
+        time.sleep(1)
+        
+        response = session.get(search_url, timeout=15)
         response.raise_for_status()
         
         # Parse HTML
