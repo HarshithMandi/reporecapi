@@ -80,18 +80,94 @@ def summarize_snippet(snippet: str) -> str:
         logger.error(f"Error summarizing snippet: {e}")
         return snippet  # Return original snippet if summarization fails
 
-# ==== Helper function to extract clean link ====
-def extract_clean_link(title_tag) -> str:
-    if title_tag and title_tag.a:
-        href = title_tag.a.get("href", "")
-        if href.startswith("/scholar?"):
-            # Convert relative URL to absolute
-            return f"https://scholar.google.com{href}"
-        elif href.startswith("http"):
-            return href
-    return "No link available"
+# ==== Optional Google Scholar Backup Endpoint ====
+@app.post("/search-scholar", response_model=List[PaperCard])
+async def search_papers_scholar(data: PromptRequest):
+    """Backup endpoint using Google Scholar (may be blocked)"""
+    try:
+        # Validate input
+        if not data.query or not data.query.strip():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+        
+        # Generate smart search query
+        smart_query = generate_search_query(data.query)
+        logger.info(f"Using Google Scholar for query: {smart_query}")
+        
+        # Properly encode the search query
+        encoded_query = urllib.parse.quote_plus(smart_query)
+        search_url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num=10"
+        
+        # Headers to mimic a real browser
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://scholar.google.com/",
+        }
 
-# ==== Main Endpoint ====
+        # Make request with timeout
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Parse HTML
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Check if we got blocked
+        if "blocked" in response.text.lower():
+            raise HTTPException(status_code=503, detail="Google Scholar has blocked this request")
+        
+        results = []
+        paper_results = soup.select(".gs_ri")[:10]
+        
+        if not paper_results:
+            return []
+        
+        for idx, result in enumerate(paper_results):
+            try:
+                # Extract title
+                title_tag = result.select_one(".gs_rt")
+                title = title_tag.get_text(strip=True) if title_tag else "No title available"
+                title = title.replace("[PDF]", "").replace("[HTML]", "").strip()
+                
+                # Extract link
+                link = extract_clean_link(title_tag)
+                
+                # Extract snippet
+                snippet_tag = result.select_one(".gs_rs")
+                raw_snippet = snippet_tag.get_text(strip=True) if snippet_tag else "No snippet available"
+                
+                # Extract authors
+                author_tag = result.select_one(".gs_a")
+                authors = author_tag.get_text(strip=True) if author_tag else "No author information"
+                
+                # Summarize snippet
+                summarized_snippet = summarize_snippet(raw_snippet)
+                
+                paper_card = PaperCard(
+                    title=title,
+                    authors=authors,
+                    snippet=summarized_snippet,
+                    link=link
+                )
+                
+                results.append(paper_card)
+                
+                if idx > 0:
+                    time.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Error processing Scholar result {idx}: {e}")
+                continue
+        
+        return results
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Scholar search error: {e}")
+        raise HTTPException(status_code=500, detail="Google Scholar search failed")
+
+# ==== Main Endpoint using Semantic Scholar API ====
 @app.post("/search", response_model=List[PaperCard])
 async def search_papers(data: PromptRequest):
     try:
@@ -104,94 +180,108 @@ async def search_papers(data: PromptRequest):
         logger.info(f"Original query: {data.query}")
         logger.info(f"Generated search query: {smart_query}")
         
-        # Properly encode the search query
-        encoded_query = urllib.parse.quote_plus(smart_query)
-        search_url = f"https://scholar.google.com/scholar?q={encoded_query}&hl=en&num=10"
-        
-        # Headers to mimic a real browser with more recent user agent
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
+        # Use Semantic Scholar API
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        params = {
+            "query": smart_query,
+            "limit": 10,
+            "fields": "title,authors,abstract,url,year,venue,citationCount,externalIds"
         }
-
-        # Make request with timeout and session for better reliability
-        session = requests.Session()
-        session.headers.update(headers)
         
-        # Add a small delay to avoid being flagged as bot
-        time.sleep(1)
+        headers = {
+            "User-Agent": "Academic-Search-API/1.0 (research purposes)"
+        }
         
-        response = session.get(search_url, timeout=15)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # Parse HTML
-        soup = BeautifulSoup(response.text, "html.parser")
+        data_response = response.json()
+        papers = data_response.get("data", [])
         
-        # Check if we got blocked
-        if "blocked" in response.text.lower() or soup.select(".gs_ri") == []:
-            logger.warning("Possibly blocked by Google Scholar or no results found")
+        if not papers:
+            logger.warning("No results found from Semantic Scholar")
+            return []
         
         results = []
-        paper_results = soup.select(".gs_ri")[:10]  # Limit to first 10 results
         
-        for idx, result in enumerate(paper_results):
+        for idx, paper in enumerate(papers):
             try:
                 # Extract title
-                title_tag = result.select_one(".gs_rt")
-                title = title_tag.get_text(strip=True) if title_tag else "No title available"
+                title = paper.get("title", "No title available")
                 
-                # Clean title (remove [PDF], [HTML] etc.)
-                title = title.replace("[PDF]", "").replace("[HTML]", "").replace("[CITATION]", "").strip()
+                # Extract authors
+                authors_list = paper.get("authors", [])
+                if authors_list:
+                    author_names = [author.get("name", "Unknown") for author in authors_list]
+                    authors_str = ", ".join(author_names[:3])  # Limit to first 3 authors
+                    if len(authors_list) > 3:
+                        authors_str += " et al."
+                else:
+                    authors_str = "No author information"
                 
-                # Extract link
-                link = extract_clean_link(title_tag)
+                # Add year and venue info
+                year = paper.get("year")
+                venue = paper.get("venue")
+                citation_count = paper.get("citationCount", 0)
                 
-                # Extract snippet
-                snippet_tag = result.select_one(".gs_rs")
-                raw_snippet = snippet_tag.get_text(strip=True) if snippet_tag else "No snippet available"
+                if year or venue:
+                    additional_info = []
+                    if year:
+                        additional_info.append(str(year))
+                    if venue:
+                        additional_info.append(venue)
+                    if citation_count > 0:
+                        additional_info.append(f"Citations: {citation_count}")
+                    
+                    authors_str += f" - {', '.join(additional_info)}"
                 
-                # Extract authors and publication info
-                author_tag = result.select_one(".gs_a")
-                authors = author_tag.get_text(strip=True) if author_tag else "No author information"
+                # Extract abstract/snippet
+                abstract = paper.get("abstract", "")
+                if abstract:
+                    # Limit abstract length and summarize if needed
+                    if len(abstract) > 300:
+                        # Use Gemini to summarize long abstracts
+                        snippet = summarize_snippet(abstract)
+                    else:
+                        snippet = abstract
+                else:
+                    snippet = "No abstract available"
                 
-                # Summarize snippet using Gemini
-                summarized_snippet = summarize_snippet(raw_snippet)
-                
-                # Add small delay to avoid overwhelming Gemini API
-                if idx > 0:  # Don't delay on first iteration
-                    time.sleep(0.1)
+                # Extract URL
+                paper_url = paper.get("url", "")
+                if not paper_url:
+                    # Try to construct URL from external IDs
+                    external_ids = paper.get("externalIds", {})
+                    if external_ids.get("DOI"):
+                        paper_url = f"https://doi.org/{external_ids['DOI']}"
+                    elif external_ids.get("ArXiv"):
+                        paper_url = f"https://arxiv.org/abs/{external_ids['ArXiv']}"
+                    else:
+                        paper_url = "No direct link available"
                 
                 paper_card = PaperCard(
                     title=title,
-                    authors=authors,
-                    snippet=summarized_snippet,
-                    link=link
+                    authors=authors_str,
+                    snippet=snippet,
+                    link=paper_url
                 )
                 
                 results.append(paper_card)
                 
+                # Add small delay for Gemini API if we're summarizing
+                if idx > 0 and len(abstract) > 300:
+                    time.sleep(0.1)
+                
             except Exception as e:
-                logger.error(f"Error processing result {idx}: {e}")
+                logger.error(f"Error processing paper {idx}: {e}")
                 continue
         
-        if not results:
-            logger.warning("No results found")
-            return []
-        
-        logger.info(f"Successfully processed {len(results)} results")
+        logger.info(f"Successfully processed {len(results)} results from Semantic Scholar")
         return results
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"Network error: {e}")
-        raise HTTPException(status_code=503, detail="Failed to fetch data from Google Scholar")
+        logger.error(f"Network error connecting to Semantic Scholar: {e}")
+        raise HTTPException(status_code=503, detail="Failed to fetch data from Semantic Scholar API")
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
