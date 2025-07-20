@@ -104,7 +104,7 @@ def summarize_snippet(snippet: str) -> str:
         if len(snippet) < 100:
             return snippet
             
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""Summarize the following academic paper snippet in one clear, concise sentence.
         Focus on the main finding or contribution. Return only the summary:
         
